@@ -1,15 +1,15 @@
-# hakkoda_edw Data Vault 2.0
+# Sample Data Vault 2.0
 
 ## Project Overview
-This dbt project is a sample project meant to provide an understanding of how to use Snowflake, dbt (including dbtvault), Github, and Hakkoda's Data Vault custom implementation Recipe and Accelerators.
+This dbt project is a sample project meant to provide an understanding of how to use Snowflake, dbt (including dbtvault), Github, and XYZ Company's Data Vault custom implementation Recipe and Accelerators.
 
 ### Pre-project Checklist
 Each team member should have the following access:
 - [ ] Snowflake account (https://ht48847.canada-central.azure.snowflakecomputing.com/)
-- [ ] Member of dbt Cloud Hakkoda EDW Data Vault Project
-- [ ] Write Access to GitHub Hakkoda EDW Data Vault Project repo
-- [ ] Access to Snowflake HAKKODA_EDW database(s) including DEV, QA, and PROD environments
-- [ ] Snowflake Role HAKKODA_EDW_ROLE
+- [ ] Member of dbt Cloud XYZ Company EDW Data Vault Project
+- [ ] Write Access to GitHub XYZ Company EDW Data Vault Project repo
+- [ ] Access to Snowflake XYZ Company_EDW database(s) including DEV, QA, and PROD environments
+- [ ] Snowflake Role XYZ Company_EDW_ROLE
 
 ### Solution Architecture
 The following high-level diagram describes how data will be ingested from the sample source sources, modeled in a Data Vault 2.0 Raw Vault, Business Vault and Information Mart for downstream analytics. The diagram is available as a template in Miro [here](https://miro.com/app/board/uXjVP8uiR7s=/?share_link_id=809372791811) and show below:
@@ -49,7 +49,7 @@ Business Vault & Information Mart data models will be created to prepare data fo
 dbt Jobs will be created within the dbt Cloud UI to orchestrate Data Warehouse loads on a regular interval. The job(s) will be composed of a series of commands (i.e. `dbt run`, `dbt test`, and `dbt run-operation`) to load, test, and perform maintenance operations.
 
 #### 5. Deploy Data Pipelines
-The development lifecycle of the Data Warehouse will include 3 environments; Development (HAKKODA_EDW_DEV), Quality Assurance (HAKKODA_EDW_QA) and Production (HAKKODA_EDW). Once development has been completed on a data pipeline (including unit testing & applying tests/documentation) the developer will create a [pull request](#pull-request-template) using the standards defined in the appendix and then the new feature or fix will follow the steps listed [here](#deployment-workflow) before making it into Production where it will be consumed with the analysts.
+The development lifecycle of the Data Warehouse will include 3 environments; Development (XYZ Company_EDW_DEV), Quality Assurance (XYZ Company_EDW_QA) and Production (XYZ Company_EDW). Once development has been completed on a data pipeline (including unit testing & applying tests/documentation) the developer will create a [pull request](#pull-request-template) using the standards defined in the appendix and then the new feature or fix will follow the steps listed [here](#deployment-workflow) before making it into Production where it will be consumed with the analysts.
 
 ## Appendix
 
@@ -220,7 +220,7 @@ Example: a key to the `customers` table should be named `customer_id` rather tha
   - If switching to `incremental`, this should be specified in the model's configuration.
 
 ### Unit Testing
-At a minimum, developers need to perform the following unit tests before creating their Pull Request. Screenshots of the successful unit tests should be included as part of your pull request in the [Validation of models](https://github.com/Hakkoda1/dbt_capstone_solution/blob/main/pull_request_template.md#validation-of-models) section.
+At a minimum, developers need to perform the following unit tests before creating their Pull Request. Screenshots of the successful unit tests should be included as part of your pull request in the [Validation of models](https://github.com/XYZ Company1/dbt_capstone_solution/blob/main/pull_request_template.md#validation-of-models) section.
 
   1. [Compare Row Counts](https://github.com/dbt-labs/dbt-audit-helper/tree/0.6.0/#compare_relations-source) 
   This test will ensure that all rows have arrived in the target when compared to the source. Add a screenshot of the unit test preview from the dbt Cloud UI in your pull request similar to the table below:
@@ -323,7 +323,7 @@ The following diagram highlights the branching strategy defined for the project:
 8. After the release branch PR is merged a second Github action triggers creation of  a git Release and generates release notes.
 
 ### Pull Request Template
-[This pull request template]([pull_request_template.md](https://github.com/Hakkoda1/dbt_capstone_solution/blob/main/pull_request_template.md#validation-of-models)), located in the root of our repository, has been created to standardize pull requests across the project team. For reference, review [this article from dbt-Labs](https://docs.getdbt.com/blog/analytics-pull-request-template) describes the importance of having a standardized template for pull requests and provides screenshots of a completed pull request as a guide.
+[This pull request template]([pull_request_template.md](https://github.com/XYZ Company1/dbt_capstone_solution/blob/main/pull_request_template.md#validation-of-models)), located in the root of our repository, has been created to standardize pull requests across the project team. For reference, review [this article from dbt-Labs](https://docs.getdbt.com/blog/analytics-pull-request-template) describes the importance of having a standardized template for pull requests and provides screenshots of a completed pull request as a guide.
 
 ### CTEs
 
