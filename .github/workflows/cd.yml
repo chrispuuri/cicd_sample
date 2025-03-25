@@ -65,4 +65,17 @@ jobs:
           echo "Checking token validity and permissions..."
           # Check repo permissions
           echo "Repository permissions:"
-          gh api repos/${{ github.repository }} --jq '.permissions'
+          gh api repos/${{ github.repository }} --jq '.permissions' || echo "Failed to get permissions"
+          
+          # Check if token has access to the repository
+          echo "Checking repository access..."
+          gh repo view ${{ github.repository }} --json name -q '.name' || echo "Failed to access repository"
+          
+          # Check if token can list pull requests
+          echo "Checking pull request access..."
+          gh pr list -L 1 || echo "Failed to list pull requests"
+          
+          # Check if token can create branches
+          echo "Checking branch creation ability..."
+          git fetch origin || echo "Failed to fetch from origin"
+
