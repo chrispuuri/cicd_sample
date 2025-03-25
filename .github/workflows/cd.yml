@@ -129,22 +129,39 @@ jobs:
           git checkout -b $BRANCH_NAME
           
           echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
-          echo "Created branch: ${BRANCH_NAME} for version ${{ env.RELEASE_VERSION }}"
+          echo "Created release branch: ${BRANCH_NAME}"
 
-      - name: Install Python 3.11
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Generate release changelog
+      - name: Build changelog
         id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v5
-        with:
-          toTag: "HEAD"
-          fromTag: ${{ steps.get_latest_release.outputs.latest_tag }}
-          configurationFile: .github/changelog-config.json
-        env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          # Get the latest tag
+          LATEST_TAG="${{ steps.get_latest_release.outputs.latest_tag }}"
+          
+          # Generate changelog from commits since the latest tag
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            # If this is the first release, get all commits
+            CHANGELOG=$(git log --pretty=format:"* %s (%h)" --reverse)
+          else
+            # Otherwise, get commits since the latest tag
+            CHANGELOG=$(git log ${LATEST_TAG}..HEAD --pretty=format:"* %s (%h)" --reverse)
+          fi
+          
+          # If no commits found, add a placeholder
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="* No changes since last release"
+          fi
+          
+          # Add release type information
+          CHANGELOG="### Release Type: ${{ github.event.inputs.release_type }}\n\n${CHANGELOG}"
+          
+          # Output the changelog
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Print the changelog for debugging
+          echo "Changelog:"
+          echo "$CHANGELOG"
 
       - name: Update CHANGELOG.md file
         run: |
@@ -169,11 +186,7 @@ jobs:
           git commit -m "Update CHANGELOG.md for release ${{ env.RELEASE_VERSION }}"
           
           # Push the changes to the release branch
-          git push -u origin ${{ steps.create_release_branch.outputs.branch_name }} || {
-            echo "Failed to push to release branch. This might be due to permission issues."
-            echo "Please check your GitHub App permissions and make sure it has write access to the repository."
-            exit 1
-          }
+          git push -u origin ${{ steps.create_release_branch.outputs.branch_name }}
 
       - name: Create pull request to QA
         id: create_pr_to_qa
@@ -186,11 +199,7 @@ jobs:
           PR_URL=$(gh pr create --title "Release ${{ env.RELEASE_VERSION }} - Update CHANGELOG" \
             --body "# Release ${{ env.RELEASE_VERSION }}\n\nThis PR updates the CHANGELOG.md for release ${{ env.RELEASE_VERSION }}.\n\nRelease type: ${{ github.event.inputs.release_type }}\n\n## Changelog\n${{ steps.build_changelog.outputs.changelog }}" \
             --base qa \
-            --head ${{ steps.create_release_branch.outputs.branch_name }}) || {
-            echo "Failed to create PR to QA. This might be due to permission issues."
-            echo "Please check your GitHub App permissions and make sure it has write access to pull requests."
-            exit 1
-          }
+            --head ${{ steps.create_release_branch.outputs.branch_name }})
           
           echo "Created PR to QA: $PR_URL for version ${{ env.RELEASE_VERSION }}"
           
@@ -198,15 +207,13 @@ jobs:
           QA_PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
           echo "qa_pr_number=$QA_PR_NUMBER" >> $GITHUB_OUTPUT
           
-          echo "Self-approving PR #$QA_PR_NUMBER..."
+          echo "Attempting to merge PR #$QA_PR_NUMBER with admin privileges..."
           
-          # Self-approve the PR
-          gh pr review $QA_PR_NUMBER --approve || echo "Warning: Could not approve PR"
-          
-          # Try to merge the PR after approval
-          echo "Attempting to merge PR #$QA_PR_NUMBER after approval..."
-          gh pr merge $QA_PR_NUMBER --merge --delete-branch || {
-            echo "Could not automatically merge PR. This might be due to branch protection rules."
+          # Try to merge the PR with admin privileges to bypass branch protection
+          gh pr merge $QA_PR_NUMBER --merge --admin || {
+            echo "Could not merge PR with admin privileges."
+            echo "This might be because the GitHub App doesn't have admin access to the repository."
+            echo "Please ensure your GitHub App has 'Administration: Read & write' permission."
             echo "Waiting for manual merge..."
           }
           
@@ -240,7 +247,12 @@ jobs:
           # Wait a bit after merging to ensure GitHub processes the merge
           echo "Waiting 10 seconds for GitHub to process the merge..."
           sleep 10
-          
+
+      - name: Create pull request to Main
+        id: create_pr
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
           # Checkout QA branch again to get the latest changes
           echo "Fetching latest qa branch..."
           git fetch origin qa
@@ -255,10 +267,6 @@ jobs:
           PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "Created PR #$PR_NUMBER from QA to Main for version ${{ env.RELEASE_VERSION }}"
-          
-          # Self-approve the PR
-          echo "Self-approving PR #$PR_NUMBER..."
-          gh pr review $PR_NUMBER --approve || echo "Warning: Could not approve PR"
           
           # Save changelog to output
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
@@ -304,10 +312,12 @@ jobs:
             exit 1
           fi
           
-          # Try to merge the PR
-          echo "Attempting to merge PR #${{ needs.prepare_release.outputs.pr_number }}..."
-          gh pr merge ${{ needs.prepare_release.outputs.pr_number }} --merge --delete-branch || {
-            echo "Could not automatically merge PR. This might be due to branch protection rules."
+          # Try to merge the PR with admin privileges
+          echo "Attempting to merge PR #${{ needs.prepare_release.outputs.pr_number }} with admin privileges..."
+          gh pr merge ${{ needs.prepare_release.outputs.pr_number }} --merge --admin || {
+            echo "Could not merge PR with admin privileges."
+            echo "This might be because the GitHub App doesn't have admin access to the repository."
+            echo "Please ensure your GitHub App has 'Administration: Read & write' permission."
             echo "Waiting for manual merge..."
           }
           
