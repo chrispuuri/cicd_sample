@@ -36,6 +36,7 @@ jobs:
     # Set required permissions for this job
     permissions:
       contents: write    # For checkout, pushing changes
+      pull-requests: write  # For creating PRs
     outputs:
       new_version: ${{ steps.bump_version.outputs.new_version }}
       pr_number: ${{ steps.create_pr.outputs.pr_number }}
@@ -56,7 +57,7 @@ jobs:
           app-id: ${{ vars.MY_GITHUB_APP_ID }}
           private-key: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repository: ${{ github.event.repository.name }}
+          repositories: ${{ github.event.repository.name }}
 
       - name: Debug token permissions
         env:
@@ -65,17 +66,365 @@ jobs:
           echo "Checking token validity and permissions..."
           # Check repo permissions
           echo "Repository permissions:"
-          gh api repos/${{ github.repository }} --jq '.permissions' || echo "Failed to get permissions"
+          gh api repos/${{ github.repository }} --jq '.permissions'
           
           # Check if token has access to the repository
           echo "Checking repository access..."
           gh repo view ${{ github.repository }} --json name -q '.name' || echo "Failed to access repository"
-          
-          # Check if token can list pull requests
-          echo "Checking pull request access..."
-          gh pr list -L 1 || echo "Failed to list pull requests"
-          
-          # Check if token can create branches
-          echo "Checking branch creation ability..."
-          git fetch origin || echo "Failed to fetch from origin"
 
+      - name: Configure Git user
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+          # Configure Git to use the token for authentication
+          git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
+
+      - name: Get latest release version
+        id: get_latest_release
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+          echo "Latest release tag: ${LATEST_TAG}"
+
+      - name: Bump version number
+        id: bump_version
+        run: |
+          LATEST_TAG="${{ steps.get_latest_release.outputs.latest_tag }}"
+          LATEST_TAG=${LATEST_TAG#v}  # Remove 'v' prefix
+          
+          # Split version into components
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_TAG"
+          
+          # Increment based on release type
+          if [[ "${{ github.event.inputs.release_type }}" == "major" ]]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            echo "Incrementing MAJOR version (${{ github.event.inputs.release_type }})"
+          elif [[ "${{ github.event.inputs.release_type }}" == "minor" ]]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            echo "Incrementing MINOR version (${{ github.event.inputs.release_type }})"
+          else
+            PATCH=$((PATCH + 1))
+            echo "Incrementing PATCH version (${{ github.event.inputs.release_type }})"
+          fi
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "New version will be: ${NEW_VERSION}"
+          echo "RELEASE_VERSION=${NEW_VERSION}" >> $GITHUB_ENV
+
+      - name: Create release branch
+        id: create_release_branch
+        run: |
+          # Create a unique branch name with timestamp to avoid conflicts
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BRANCH_NAME="release/${{ env.RELEASE_VERSION }}-${TIMESTAMP}"
+          
+          # Fetch all branches to ensure we have the latest state
+          git fetch --all || echo "Warning: Failed to fetch all branches"
+          
+          # Create a new branch from the current qa branch
+          git checkout -b $BRANCH_NAME
+          
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          echo "Created branch: ${BRANCH_NAME} for version ${{ env.RELEASE_VERSION }}"
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Generate release changelog
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          toTag: "HEAD"
+          fromTag: ${{ steps.get_latest_release.outputs.latest_tag }}
+          configurationFile: .github/changelog-config.json
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      - name: Update CHANGELOG.md file
+        run: |
+          if [ ! -f CHANGELOG.md ]; then
+            echo "# Changelog" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+          fi
+          
+          # Prepend new changelog to the existing file
+          TEMP_CHANGELOG=$(mktemp)
+          echo "# Changelog" > $TEMP_CHANGELOG
+          echo "" >> $TEMP_CHANGELOG
+          echo "## ${{ env.RELEASE_VERSION }} ($(date '+%Y-%m-%d'))" >> $TEMP_CHANGELOG
+          echo "" >> $TEMP_CHANGELOG
+          echo "${{ steps.build_changelog.outputs.changelog }}" >> $TEMP_CHANGELOG
+          echo "" >> $TEMP_CHANGELOG
+          tail -n +3 CHANGELOG.md >> $TEMP_CHANGELOG 2>/dev/null || true
+          mv $TEMP_CHANGELOG CHANGELOG.md
+          
+          # Commit the updated changelog
+          git add CHANGELOG.md
+          git commit -m "Update CHANGELOG.md for release ${{ env.RELEASE_VERSION }}"
+          
+          # Push the changes to the release branch
+          git push -u origin ${{ steps.create_release_branch.outputs.branch_name }} || {
+            echo "Failed to push to release branch. This might be due to permission issues."
+            echo "Please check your GitHub App permissions and make sure it has write access to the repository."
+            exit 1
+          }
+
+      - name: Create pull request to QA
+        id: create_pr_to_qa
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          echo "Creating PR from ${{ steps.create_release_branch.outputs.branch_name }} to qa..."
+          
+          # Create PR to QA branch
+          PR_URL=$(gh pr create --title "Release ${{ env.RELEASE_VERSION }} - Update CHANGELOG" \
+            --body "# Release ${{ env.RELEASE_VERSION }}\n\nThis PR updates the CHANGELOG.md for release ${{ env.RELEASE_VERSION }}.\n\nRelease type: ${{ github.event.inputs.release_type }}\n\n## Changelog\n${{ steps.build_changelog.outputs.changelog }}" \
+            --base qa \
+            --head ${{ steps.create_release_branch.outputs.branch_name }}) || {
+            echo "Failed to create PR to QA. This might be due to permission issues."
+            echo "Please check your GitHub App permissions and make sure it has write access to pull requests."
+            exit 1
+          }
+          
+          echo "Created PR to QA: $PR_URL for version ${{ env.RELEASE_VERSION }}"
+          
+          # Extract PR number
+          QA_PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+          echo "qa_pr_number=$QA_PR_NUMBER" >> $GITHUB_OUTPUT
+          
+          # Self-approve the PR
+          echo "Self-approving PR #$QA_PR_NUMBER..."
+          
+          # Wait for PR to be merged
+          echo "Waiting for PR #$QA_PR_NUMBER to be merged..."
+          MAX_ATTEMPTS=60  # Increased to 10 minutes (60 * 10 seconds)
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            PR_STATE=$(gh pr view $QA_PR_NUMBER --json state -q '.state' 2>/dev/null || echo "ERROR")
+            
+            if [ "$PR_STATE" = "MERGED" ]; then
+              echo "PR #$QA_PR_NUMBER has been merged successfully."
+              break
+            elif [ "$PR_STATE" = "CLOSED" ]; then
+              echo "PR #$QA_PR_NUMBER was closed without being merged."
+              exit 1
+            elif [ "$PR_STATE" = "ERROR" ]; then
+              echo "Error checking PR state. Retrying..."
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PR #$QA_PR_NUMBER is still open. Waiting 10 seconds..."
+            sleep 10
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Timed out waiting for PR #$QA_PR_NUMBER to be merged."
+            echo "Please manually merge the PR and restart the workflow."
+            exit 1
+          fi
+          
+          # Checkout QA branch again to get the latest changes
+          echo "Fetching latest qa branch..."
+          git fetch origin qa
+          git checkout qa
+          
+          echo "Creating PR from qa to main..."
+          PR_URL=$(gh pr create --title "Release ${{ env.RELEASE_VERSION }}" \
+            --body "# Release ${{ env.RELEASE_VERSION }}\n\nThis PR merges QA into Main for release ${{ env.RELEASE_VERSION }}.\n\nRelease type: ${{ github.event.inputs.release_type }}\n\n## Changelog\n${{ steps.build_changelog.outputs.changelog }}" \
+            --base main \
+            --head qa)
+          
+          PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "Created PR #$PR_NUMBER from QA to Main for version ${{ env.RELEASE_VERSION }}"
+          
+          # Save changelog to output
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ steps.build_changelog.outputs.changelog }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Self-Approve PR to QA
+        uses: nicklegan/github-repo-self-approve-action@v1.0.1
+        with:
+          appid: ${{ vars.MY_GITHUB_APP_ID }}
+          privatekey: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
+          installationid: ${{ vars.MY_GITHUB_APP_INSTALLATION_ID }}
+          repository: ${{ github.repository }}
+          pull-request: ${{ steps.create_pr_to_qa.outputs.qa_pr_number }}
+
+  merge_pr:
+    name: Wait for PR Merge
+    needs: prepare_release
+    runs-on: ubuntu-latest
+    # Set required permissions for this job
+    permissions:
+      contents: read    # For checkout
+      pull-requests: read  # For checking PR status
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MY_GITHUB_APP_ID }}
+          private-key: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+        
+      - name: Wait for PR to be merged
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          echo "Checking PR #${{ needs.prepare_release.outputs.pr_number }} status..."
+          
+          # Check if PR is already merged
+          PR_STATE=$(gh pr view ${{ needs.prepare_release.outputs.pr_number }} --json state -q '.state')
+          
+          if [ "$PR_STATE" = "MERGED" ]; then
+            echo "PR #${{ needs.prepare_release.outputs.pr_number }} is already merged. Continuing workflow."
+            exit 0
+          elif [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${{ needs.prepare_release.outputs.pr_number }} is not open. Current state: $PR_STATE"
+            echo "Cannot proceed with workflow."
+            exit 1
+          fi
+          
+          echo "Waiting for PR #${{ needs.prepare_release.outputs.pr_number }} to be merged..."
+          echo "NOTE: Auto-merge is not enabled for this repository."
+          echo "Please manually approve and merge the PR #${{ needs.prepare_release.outputs.pr_number }} to the main branch."
+          
+          MAX_ATTEMPTS=60  # Increased to 10 minutes (60 * 10 seconds)
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            PR_STATE=$(gh pr view ${{ needs.prepare_release.outputs.pr_number }} --json state -q '.state')
+            
+            if [ "$PR_STATE" = "MERGED" ]; then
+              echo "PR #${{ needs.prepare_release.outputs.pr_number }} has been merged successfully."
+              break
+            elif [ "$PR_STATE" = "CLOSED" ]; then
+              echo "PR #${{ needs.prepare_release.outputs.pr_number }} was closed without being merged."
+              exit 1
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PR #${{ needs.prepare_release.outputs.pr_number }} is still open. Waiting 10 seconds..."
+            sleep 10
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Timed out waiting for PR #${{ needs.prepare_release.outputs.pr_number }} to be merged."
+            echo "Please manually merge the PR and restart the workflow."
+            exit 1
+          fi
+
+      - name: Self-Approve PR to Main
+        uses: nicklegan/github-repo-self-approve-action@v1.0.1
+        with:
+          appid: ${{ vars.MY_GITHUB_APP_ID }}
+          privatekey: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
+          installationid: ${{ vars.MY_GITHUB_APP_INSTALLATION_ID }}
+          repository: ${{ github.repository }}
+          pull-request: ${{ needs.prepare_release.outputs.pr_number }}
+
+  tag_release:
+    name: Tag Release
+    needs: [prepare_release, merge_pr]
+    runs-on: ubuntu-latest
+    # Set required permissions for this job
+    permissions:
+      contents: write    # For creating tags and releases
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          ref: main  # Checkout main after the PR has been merged
+          
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MY_GITHUB_APP_ID }}
+          private-key: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          
+      - name: Create Git tag
+        run: |
+          echo "Creating tag ${{ needs.prepare_release.outputs.new_version }}..."
+          # Create a tag
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+          git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
+          
+          # Check if tag already exists
+          if git rev-parse "${{ needs.prepare_release.outputs.new_version }}" >/dev/null 2>&1; then
+            echo "Warning: Tag ${{ needs.prepare_release.outputs.new_version }} already exists. Skipping tag creation."
+          else
+            git tag -a ${{ needs.prepare_release.outputs.new_version }} -m "Release ${{ needs.prepare_release.outputs.new_version }} (${{ github.event.inputs.release_type }})"
+            git push origin ${{ needs.prepare_release.outputs.new_version }}
+            echo "Created and pushed tag ${{ needs.prepare_release.outputs.new_version }}"
+          fi
+        
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          echo "Creating GitHub release ${{ needs.prepare_release.outputs.new_version }}..."
+          # Check if release already exists
+          if gh release view ${{ needs.prepare_release.outputs.new_version }} &>/dev/null; then
+            echo "Warning: Release ${{ needs.prepare_release.outputs.new_version }} already exists. Skipping release creation."
+          else
+            # Create a release using gh cli
+            gh release create ${{ needs.prepare_release.outputs.new_version }} \
+              --title "Release ${{ needs.prepare_release.outputs.new_version }} (${{ github.event.inputs.release_type }})" \
+              --notes "${{ needs.prepare_release.outputs.changelog }}" \
+              --target main
+            echo "Created GitHub release ${{ needs.prepare_release.outputs.new_version }}"
+          fi
+
+  run_dbt_cloud_job:
+    name: Run dbt Cloud Job
+    needs: [prepare_release, tag_release]
+    runs-on: ubuntu-latest
+    # Only run this job if the user selected to run the dbt job
+    if: ${{ github.event.inputs.run_dbt_job == 'true' }}
+    # No special permissions needed for this job
+    env:
+      DBT_ACCOUNT_ID: ${{ vars.DBT_ACCOUNT_ID }}
+      DBT_PROJECT_ID: ${{ vars.DBT_PROJECT_ID }}
+      # Dynamically set the job ID based on the selected job type
+      DBT_JOB_ID: ${{ github.event.inputs.job_type == 'full' && vars.DBT_JOB_ID || vars.DBT_SLIM_JOB_ID }}
+      DBT_API_KEY: ${{ secrets.DBT_API_KEY }}
+      DBT_JOB_CAUSE: ${{ format('GitHub Release {0} - {1} job', needs.prepare_release.outputs.new_version, github.event.inputs.job_type) }}
+      DBT_JOB_BRANCH: 'main'
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'  # Ensure we're using the main branch after merge
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Run dbt Cloud job
+        run: "python python/run_and_monitor_dbt_job.py"
+        
+      - name: Log job details
+        run: |
+          echo "Running ${{ github.event.inputs.job_type }} dbt job for release ${{ needs.prepare_release.outputs.new_version }}"
+          echo "Job ID: ${{ env.DBT_JOB_ID }}"
+          echo "Job Cause: ${{ env.DBT_JOB_CAUSE }}"
