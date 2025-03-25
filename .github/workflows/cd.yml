@@ -198,17 +198,26 @@ jobs:
           QA_PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
           echo "qa_pr_number=$QA_PR_NUMBER" >> $GITHUB_OUTPUT
           
-          # Self-approve the PR
           echo "Self-approving PR #$QA_PR_NUMBER..."
+          
+          # Self-approve the PR
+          gh pr review $QA_PR_NUMBER --approve || echo "Warning: Could not approve PR"
+          
+          # Try to merge the PR after approval
+          echo "Attempting to merge PR #$QA_PR_NUMBER after approval..."
+          gh pr merge $QA_PR_NUMBER --merge --delete-branch || {
+            echo "Could not automatically merge PR. This might be due to branch protection rules."
+            echo "Waiting for manual merge..."
+          }
           
           # Wait for PR to be merged
           echo "Waiting for PR #$QA_PR_NUMBER to be merged..."
-          MAX_ATTEMPTS=60  # Increased to 10 minutes (60 * 10 seconds)
+          MAX_ATTEMPTS=60  # 10 minutes (60 * 10 seconds)
           ATTEMPT=0
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            PR_STATE=$(gh pr view $QA_PR_NUMBER --json state -q '.state' 2>/dev/null || echo "ERROR")
+            PR_STATE=$(gh pr view $QA_PR_NUMBER --json state -q '.state')
             
             if [ "$PR_STATE" = "MERGED" ]; then
               echo "PR #$QA_PR_NUMBER has been merged successfully."
@@ -216,8 +225,6 @@ jobs:
             elif [ "$PR_STATE" = "CLOSED" ]; then
               echo "PR #$QA_PR_NUMBER was closed without being merged."
               exit 1
-            elif [ "$PR_STATE" = "ERROR" ]; then
-              echo "Error checking PR state. Retrying..."
             fi
             
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PR #$QA_PR_NUMBER is still open. Waiting 10 seconds..."
@@ -229,6 +236,10 @@ jobs:
             echo "Please manually merge the PR and restart the workflow."
             exit 1
           fi
+          
+          # Wait a bit after merging to ensure GitHub processes the merge
+          echo "Waiting 10 seconds for GitHub to process the merge..."
+          sleep 10
           
           # Checkout QA branch again to get the latest changes
           echo "Fetching latest qa branch..."
@@ -245,28 +256,23 @@ jobs:
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "Created PR #$PR_NUMBER from QA to Main for version ${{ env.RELEASE_VERSION }}"
           
+          # Self-approve the PR
+          echo "Self-approving PR #$PR_NUMBER..."
+          gh pr review $PR_NUMBER --approve || echo "Warning: Could not approve PR"
+          
           # Save changelog to output
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
           echo "${{ steps.build_changelog.outputs.changelog }}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Self-Approve PR to QA
-        uses: nicklegan/github-repo-self-approve-action@v1.0.1
-        with:
-          appid: ${{ vars.MY_GITHUB_APP_ID }}
-          privatekey: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
-          installationid: ${{ vars.MY_GITHUB_APP_INSTALLATION_ID }}
-          repository: ${{ github.repository }}
-          pull-request: ${{ steps.create_pr_to_qa.outputs.qa_pr_number }}
-
   merge_pr:
-    name: Wait for PR Merge
+    name: Merge PR to Main
     needs: prepare_release
     runs-on: ubuntu-latest
     # Set required permissions for this job
     permissions:
       contents: read    # For checkout
-      pull-requests: read  # For checking PR status
+      pull-requests: write  # For merging PR
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -280,7 +286,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
         
-      - name: Wait for PR to be merged
+      - name: Merge PR to Main
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
@@ -298,11 +304,16 @@ jobs:
             exit 1
           fi
           
-          echo "Waiting for PR #${{ needs.prepare_release.outputs.pr_number }} to be merged..."
-          echo "NOTE: Auto-merge is not enabled for this repository."
-          echo "Please manually approve and merge the PR #${{ needs.prepare_release.outputs.pr_number }} to the main branch."
+          # Try to merge the PR
+          echo "Attempting to merge PR #${{ needs.prepare_release.outputs.pr_number }}..."
+          gh pr merge ${{ needs.prepare_release.outputs.pr_number }} --merge --delete-branch || {
+            echo "Could not automatically merge PR. This might be due to branch protection rules."
+            echo "Waiting for manual merge..."
+          }
           
-          MAX_ATTEMPTS=60  # Increased to 10 minutes (60 * 10 seconds)
+          # Wait for PR to be merged
+          echo "Waiting for PR #${{ needs.prepare_release.outputs.pr_number }} to be merged..."
+          MAX_ATTEMPTS=60  # 10 minutes (60 * 10 seconds)
           ATTEMPT=0
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
@@ -326,15 +337,10 @@ jobs:
             echo "Please manually merge the PR and restart the workflow."
             exit 1
           fi
-
-      - name: Self-Approve PR to Main
-        uses: nicklegan/github-repo-self-approve-action@v1.0.1
-        with:
-          appid: ${{ vars.MY_GITHUB_APP_ID }}
-          privatekey: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
-          installationid: ${{ vars.MY_GITHUB_APP_INSTALLATION_ID }}
-          repository: ${{ github.repository }}
-          pull-request: ${{ needs.prepare_release.outputs.pr_number }}
+          
+          # Wait a bit after merging to ensure GitHub processes the merge
+          echo "Waiting 10 seconds for GitHub to process the merge..."
+          sleep 10
 
   tag_release:
     name: Tag Release
