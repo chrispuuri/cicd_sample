@@ -1,0 +1,68 @@
+name: Continuous Delivery - Release Process
+
+# Set default permissions as restrictive as possible
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_dbt_job:
+        description: 'Run dbt Cloud job after release'
+        required: true
+        default: 'false'
+        type: boolean
+      job_type:
+        description: 'dbt job type to run'
+        required: true
+        default: 'slim'
+        type: choice
+        options:
+          - full
+          - slim
+      release_type:
+        description: 'Release type (major, minor, patch)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+jobs:
+  prepare_release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    # Set required permissions for this job
+    permissions:
+      contents: write    # For checkout, pushing changes
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+      pr_number: ${{ steps.create_pr.outputs.pr_number }}
+      qa_pr_number: ${{ steps.create_pr_to_qa.outputs.qa_pr_number }}
+      changelog: ${{ steps.build_changelog.outputs.changelog }}
+      release_branch: ${{ steps.create_release_branch.outputs.branch_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history for release notes
+          ref: qa  # Explicitly checkout the qa branch
+
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MY_GITHUB_APP_ID }}
+          private-key: ${{ secrets.MY_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Debug token permissions
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          echo "Checking token validity and permissions..."
+          # Check repo permissions
+          echo "Repository permissions:"
+          gh api repos/${{ github.repository }} --jq '.permissions'
