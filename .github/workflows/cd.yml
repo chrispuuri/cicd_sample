@@ -409,6 +409,20 @@ jobs:
             echo "Created GitHub release ${{ needs.prepare_release.outputs.new_version }}"
           fi
 
+      - name: Delete release branch
+        run: |
+          echo "Deleting release branch ${{ needs.prepare_release.outputs.release_branch }}..."
+          
+          # Configure Git to use the token for authentication
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+          git remote set-url origin https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${{ github.repository }}.git
+          
+          # Delete the branch remotely
+          git push origin --delete ${{ needs.prepare_release.outputs.release_branch }} || echo "Branch may already be deleted or protected"
+          
+          echo "Release branch ${{ needs.prepare_release.outputs.release_branch }} has been deleted"
+
   run_dbt_cloud_job:
     name: Run dbt Cloud Job
     needs: [prepare_release, tag_release]
